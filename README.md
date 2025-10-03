@@ -1,4 +1,4 @@
-# transcriptomic_and_proteomic_profiling_of_adjuvant_treated_NSCLC
+# Transcriptomic and Proteomic Profiling of Adjuvant-Treated NSCLC
 Code for the paper "Spatial Multiomic Profiling Identifies Metabolic and Inflammatory Niches Driving Recurrence in Adjuvant-Treated NSCLC."
 
 Univariate analysis reflecting Figures2-4 is documented in UnivariateAnalysis/
