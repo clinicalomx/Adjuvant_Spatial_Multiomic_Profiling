@@ -1,0 +1,413 @@
+---
+title: "Statistics_adjuvant"
+output: html_document
+date: "2026-05-03"
+---
+
+# Statistical analysis
+This code is for the statistical analysis that was performed on "Spatial Multiomic Profiling Identifies Metabolic and Inflammatory Signatures Driving Recurrence in Adjuvant-Treated NSCLC"
+by Berrell, Tan, Killgallon et al. 2026. 
+
+Specifically, this code refers to the statistical approach employed for the proteomic data analysis and uses mixed-effects modelling to account for instances of multiple samples per patient (pseudo-replicates). As these replicates were samples up to several centremeters apart, we opted for a mixed-effects model rather than averaging the scores to not dilute the within-patient biological heterogeneity. 
+
+```{r setup, include=FALSE}
+
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(lme4)
+library(lmerTest)
+library(survival)
+library(ClusterBootstrap)
+library(survival)
+
+# read the features - these have already been filtered by variance criteria, where over 60 values of each feature must be unique. 
+
+features <- read_excel("features_filtered_updated_160226.xlsx")
+
+#remove samples that are not Adenocarcinoma or Squamous
+samples_to_remove <- c("Adenosquamous", "Large cell")
+
+# Exclude these players from the dataframe
+feature_full <- features[!(features$Histology %in% samples_to_remove), ]
+
+```
+
+
+## Preparing data
+
+- Clean up the data here by fixing column names to not have any symbols. 
+- create stage broad column: stage 1 and stage 2 = early, stage 3 = advanced
+- filter the dataframe to exclude some of the metadata. Only to include time to relapse, relapse status, patient ID, Histology and stage
+
+```{r}
+#Cleaning data 
+colnames(feature_full) <- gsub("@", "", colnames(feature_full), fixed=TRUE)
+colnames(feature_full) <- gsub("+", "", colnames(feature_full), fixed=TRUE)
+colnames(feature_full) <- gsub("~", "_to_", colnames(feature_full), fixed=TRUE)
+colnames(feature_full) <- gsub(":", "in", colnames(feature_full), fixed=TRUE)
+colnames(feature_full) <- gsub("&", "_", colnames(feature_full), fixed=TRUE)
+
+
+feature_full$stage_broad <- ifelse(feature_full$stage_grouped =="stage3", "Advanced", "Early")
+
+results_list_full_stage_hist <- list()
+
+
+#Columns with numeric values-> filter to only these (should be features only and not clinical data)
+numeric_cols <- sapply(feature_full, is.numeric)
+
+df_numeric <- feature_full[, numeric_cols]
+
+feature_vars <- setdiff(
+  colnames(df_numeric),
+  c("Relapse_followup...6922","Relapse_status...6921")
+)
+
+
+df_filtered <- feature_full[, c(
+  "Relapse_followup...6922",
+  "Relapse_status...6921",
+  "patientID",
+  "Histology",
+  "stage_broad",
+  "stage_grouped",
+  feature_vars
+)]
+
+#scale the features only (not the clinical data)
+df_filtered[feature_vars] <- scale(df_filtered[feature_vars])
+
+```
+
+
+# Cox model
+Mixed-effects coxmodel assessing all samples + histology +stage 
+- this model uses the cluster argument to account for multiple samples/patient
+- code runs a loop for all features then applies bonferroni and Benjamini Hochberg p-value adjustments
+
+```{r}
+
+for (feature in feature_vars){
+  formula_text <- paste0(
+    "Surv(Relapse_followup...6922, Relapse_status...6921) ~ ",
+        feature,
+    " + Histology +stage_broad + cluster(patientID)"
+  )
+ model_full <- tryCatch(
+    coxph(as.formula(formula_text), data = df_filtered),
+    error = function(e) return(NULL)
+  )
+  
+  if (is.null(model_full)) next
+  
+  summary_model_full <- summary(model_full)
+  
+  # Make sure the feature exists in the model output
+  if (!(feature %in% rownames(summary_model_full$coefficients))) next
+  
+  coef_row <- summary_model_full$coefficients[feature, ]
+  
+  results_list_full_stage_hist[[feature]] <- data.frame(
+    variable = feature,
+    estimate = coef_row["coef"],
+    std.error = coef_row["robust se"],   # IMPORTANT when using cluster()
+    z = coef_row["z"],
+    p.value = coef_row["Pr(>|z|)"],
+    HR = exp(coef_row["coef"]),
+    lower_CI = exp(coef_row["coef"] - 1.96 * coef_row["robust se"]),
+    upper_CI = exp(coef_row["coef"] + 1.96 * coef_row["robust se"]),
+    c_index <- summary_model_full$concordance[1]
+  )
+}
+
+results_full_stage_hist <- do.call(rbind, results_list_full_stage_hist)
+
+
+results_full_stage_hist$p_adjusted <- p.adjust(results_full_stage_hist$p.value, method = "bonferroni")
+
+significant_findings_uni <- results_full_stage_hist %>% filter(p_adjusted<0.05)
+
+results_full_stage_hist$fdrs<-p.adjust(results_full_stage_hist$p.value, method="BH")
+write.csv(results_full_stage_hist, "stats_out/cox_allhistology.csv")
+
+```
+
+
+
+### Forest plot to display the results 
+Plotting significant findings 
+
+```{r plotting }
+library(ggplot2)
+library(dplyr)
+
+# ── 1. Filter to significant hits ─────────────────────────────────────────────
+sig_cox <- results_full_stage_hist %>% 
+  filter(fdrs < 0.05)
+
+# ── 2. Order variables by HR for cleaner plot ─────────────────────────────────
+sig_cox <- sig_cox %>%
+  mutate(variable = reorder(variable, HR))
+
+# ── 3. Forest plot ────────────────────────────────────────────────────────────
+p2 <- ggplot(significant_findings_uni, aes(x = HR, y = variable)) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
+  geom_errorbarh(aes(xmin = lower_CI, xmax = upper_CI),
+                 height = 0.25, linewidth = 0.7) +
+  geom_point(aes(size = -log10(p_adjusted),
+                 colour = ifelse(HR > 1, "Risk", "Protective"))) +
+  scale_colour_manual(values = c("Risk" = "#d73027", "Protective" ="#4575b4"),
+                      name = "Direction") +
+  scale_x_log10() +
+  scale_size_continuous(name = "-log10(p_adjusted)", range = c(2, 6)) +
+  labs(
+    x     = "Hazard Ratio (95% CI, log scale)",
+    y     = NULL,
+    title = "Significant Cox PH Results",
+    subtitle = "Adjusted for Histology + Stage | FDR < 0.05"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.text.y = element_text(size = 7) 
+  )
+
+p2
+
+```
+### Condcordance plot 
+This plot looks at the c index of the model compared with the adjusted p-values. Color of dots represent hazard ratios
+
+- change colour to better show HRs around 0 
+
+```{r}
+
+p_condcordance <- ggplot(results_full_stage_hist, aes(x=c_index....summary_model_full.concordance.1., y=-log(fdrs)))+
+  geom_point(aes(colour = log(HR)))+
+  geom_hline(yintercept = -log(0.05), linetype = "dashed")+
+  geom_vline(xintercept = 0.65)
+
+p_condcordance
+
+```
+### Volcano plot 
+Volcano plot that presents the log-fold adjusted p-values with their hazard ratios
+- shapes indicate the type of feature 
+```{r}
+results_full_stage_hist$prefix <- substr(results_full_stage_hist$variable, 1, 4)
+
+
+p_volcano <- ggplot(results_full_stage_hist, aes(x=log(HR), y=-log(fdrs), shape=prefix, label=variable))+
+  geom_point()+ 
+  #geom_text(nudge_x = 0.2, nudge_y = 0.2)+
+  #geom_text_repel(max.overlaps = 70)+
+  geom_hline(yintercept = -log(0.05), linetype = "dashed")
+ 
+  #+
+  #geom_vline(xintercept = 0.65)
+
+p_volcano
+
+```
+# Performing cox calculations on adeno samples   
+## All samples + adeno +stage 
+```{r}
+results_list_full_adeno <- list()
+
+adeno <- df_filtered[df_filtered$Histology == 'Adenocarcinoma',]
+
+numeric_cols_adeno <- sapply(adeno, is.numeric)
+
+df_numeric_adeno <- adeno[, numeric_cols_adeno]
+
+feature_vars_adeno <- setdiff(
+  colnames(df_numeric_adeno),
+  c("Relapse_followup...6922","Relapse_status...6921")
+)
+
+
+ad_df_filtered <- adeno[, c(
+  "Relapse_followup...6922",
+  "Relapse_status...6921",
+  "patientID",
+  "stage_broad",
+  feature_vars_adeno
+)]
+
+
+ad_df_filtered[feature_vars_adeno] <- scale(ad_df_filtered[feature_vars_adeno])
+
+
+for (feature in feature_vars_adeno){
+  formula_text <- paste0(
+    "Surv(Relapse_followup...6922, Relapse_status...6921) ~ ",
+        feature,
+    "+stage_broad + cluster(patientID)"
+  )
+ model_full <- tryCatch(
+    coxph(as.formula(formula_text), data = ad_df_filtered),
+    error = function(e) return(NULL)
+  )
+  
+  if (is.null(model_full)) next
+  
+  summary_model_full <- summary(model_full)
+  
+  # Make sure the feature exists in the model output
+  if (!(feature %in% rownames(summary_model_full$coefficients))) next
+  
+  coef_row <- summary_model_full$coefficients[feature, ]
+  
+  results_list_full_adeno[[feature]] <- data.frame(
+    variable = feature,
+    estimate = coef_row["coef"],
+    std.error = coef_row["robust se"],   # IMPORTANT when using cluster()
+    z = coef_row["z"],
+    p.value = coef_row["Pr(>|z|)"],
+    HR = exp(coef_row["coef"]),
+    lower_CI = exp(coef_row["coef"] - 1.96 * coef_row["robust se"]),
+    upper_CI = exp(coef_row["coef"] + 1.96 * coef_row["robust se"]),
+    c_index <- summary_model_full$concordance[1]
+  )
+}
+
+results_full_adeno <- do.call(rbind, results_list_full_adeno)
+
+
+results_full_adeno$p_adjusted <- p.adjust(results_full_adeno$p.value, method = "bonferroni")
+
+significant_findings_adeno <- results_full_adeno %>% filter(p_adjusted<0.05)
+
+results_full_adeno$fdrs<-p.adjust(results_full_adeno$p.value, method="BH")
+write.csv(results_full_adeno, "stats_out/cox_adeno.csv")
+
+```
+  
+# Linear mixed model 
+Linear mixed model was used to assess the effect of histology and stage on the features.
+- includes a convergence log to assess the models performance 
+
+```{r}
+library(effectsize)
+```
+
+```{r}
+# Define your response variables
+response_vars <- feature_vars
+
+# Store results
+results_list  <- list()
+summary_table <- data.frame()
+convergence_log <- data.frame()
+
+for (var in response_vars) {
+  
+  formula <- as.formula(paste(var, "~ Histology + stage_broad + (1|patientID)"))
+  
+  model <- tryCatch(
+    lmer(formula, data = df_filtered, REML = TRUE,
+         control = lmerControl(
+           optimizer = "bobyqa",
+           optCtrl   = list(maxfun = 2e5)
+         )),
+    error = function(e) {
+      message("Model failed for: ", var, " — ", e$message)
+      return(NULL)
+    }
+  )
+  
+  if (is.null(model)) next
+  
+  # Safe convergence check - the original code breaks on singular fits
+  # because optinfo$conv$lme4 may be empty
+  converged <- tryCatch({
+    conv_messages <- model@optinfo$conv$lme4$messages
+    if (is.null(conv_messages)) {
+      TRUE  # no messages = clean convergence
+    } else {
+      !any(grepl("failed to converge", conv_messages, ignore.case = TRUE))
+    }
+  }, error = function(e) NA)  # NA = couldn't determine
+  
+  is_singular <- isSingular(model)
+  
+  convergence_log <- rbind(convergence_log, data.frame(
+    response_var = var,
+    is_singular  = is_singular,
+    converged    = converged
+  ))
+  
+  results_list[[var]] <- model
+  
+  tidy_output <- broom.mixed::tidy(model, effects = "fixed", conf.int = TRUE)
+  tidy_output$response_var <- var
+  tidy_output$is_singular  <- is_singular
+  tidy_output$converged    <- converged
+  
+  summary_table <- rbind(summary_table, tidy_output)
+}
+
+# FDR correction
+summary_table$p_fdr <- ave(
+  summary_table$p.value,
+  summary_table$term,
+  FUN = function(p) p.adjust(p, method = "BH")
+)
+
+# Check what you got
+print(convergence_log)
+
+
+write.csv(summary_table, "stats_out/lme_results_convergnce.csv", row.names = FALSE)
+```
+
+```{r}
+# Get your significant variable names
+
+significant_hits <- subset(summary_table, p_fdr < 0.05 & term != "(Intercept)")
+
+sig_vars <- unique(significant_hits$response_var)
+sig_summary <- summary_table[summary_table$response_var %in% sig_vars, ]
+
+# For each one, print a clean summary of both fixed effects
+for (var in sig_vars) {
+  model <- results_list[[var]]
+  cat("\n========================================\n")
+  cat("Variable:", var, "\n")
+  cat("========================================\n")
+  
+  # Fixed effects with confidence intervals
+  fe <- broom.mixed::tidy(model, effects = "fixed", conf.int = TRUE)
+  fe <- subset(fe, term != "(Intercept)")
+  
+  print(fe[, c("term", "estimate", "conf.low", "conf.high", "p.value")])
+  
+  # ICC - how much variance is patient vs residual
+  vc <- as.data.frame(VarCorr(model))
+  icc <- vc$vcov[1] / sum(vc$vcov)
+  cat("ICC (patient-level variance):", round(icc, 3), "\n")
+}
+
+```
+Plot the findings 
+```{r}
+library(ggplot2)
+
+# Filter to just your significant variables, exclude intercept
+plot_data <- subset(summary_table, 
+                    response_var %in% sig_vars & term != "(Intercept)")
+
+ggplot(plot_data, aes(x = estimate, y = response_var, color = term)) +
+  geom_point(size = 3, position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0.2,
+                 position = position_dodge(width = 0.5)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(x = "Estimate (with 95% CI)", y = "Response Variable",
+       title = "Fixed Effects for Significant Variables",
+       color = "Term") +
+  theme_bw()
+```
+
