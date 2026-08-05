@@ -1,7 +1,7 @@
 # Spatial Multiomic Profiling Identifies Metabolic and Inflammatory Signatures Driving Recurrence in Adjuvant-Treated NSCLC
 Code for the paper "Spatial Multiomic Profiling Identifies Metabolic and Inflammatory Niches Driving Recurrence in Adjuvant-Treated NSCLC."
 
-Phenotyping code is documented in 
+Phenotyping code is documented in UnivariateAnalysis/ in CT.ipynb, GMM_classification.ipynb, and GMM_metabolic_classification.ipynb 
 
 Univariate proteomics analysis reflecting Figures3-5 is documented in UnivariateAnalysis/
 
