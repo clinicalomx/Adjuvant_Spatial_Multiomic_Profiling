@@ -2,8 +2,9 @@
 Code for the paper "Spatial Multiomic Profiling Identifies Metabolic and Inflammatory Niches Driving Recurrence in Adjuvant-Treated NSCLC."
 
 Phenotyping code is documented in UnivariateAnalysis/ in CT.ipynb, GMM_classification.ipynb, and GMM_metabolic_classification.ipynb 
+These analyses reflect the process of cell typing findings shown in figure 2. 
 
-Univariate proteomics analysis reflecting Figures3-5 is documented in UnivariateAnalysis/
+Univariate proteomics analysis reflecting Figures 3-5 is documented in UnivariateAnalysis/
 
 Multivariate analysis reflecting feature selection and clinical modelling in Figure 6 is
 documented in MultivariateAnalysis/
